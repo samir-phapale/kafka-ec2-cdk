@@ -1,0 +1,3 @@
+-r requirements.txt
+boto3==1.43.99
+pytest==9.1.1

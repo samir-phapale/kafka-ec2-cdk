@@ -1,0 +1,80 @@
+name: Deploy and test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: kafka-ec2-stack
+  cancel-in-progress: false
+
+env:
+  STACK_NAME: KafkaEc2Stack
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  deploy-test-destroy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests
+        run: pytest -v
+
+      - name: Configure AWS credentials
+        id: aws
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: kafka-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy
+        timeout-minutes: 30
+        run: npx --yes aws-cdk@2 deploy "$STACK_NAME" --require-approval never
+
+      - name: Test Kafka
+        timeout-minutes: 15
+        run: python scripts/kafka_test.py --stack-name "$STACK_NAME"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kafka-test-results
+          path: kafka-test-results.json
+          if-no-files-found: ignore
+
+      - name: Refresh AWS credentials
+        if: always() && steps.aws.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: kafka-destroy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Destroy
+        if: always() && steps.aws.outcome == 'success'
+        timeout-minutes: 25
+        run: bash scripts/destroy.sh "$STACK_NAME"
